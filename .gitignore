@@ -1,0 +1,20 @@
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (large/raw files typically not committed)
+*.csv
+*.xlsx
+*.RData
