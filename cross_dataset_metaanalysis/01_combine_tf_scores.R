@@ -16,25 +16,39 @@ library(tidyverse)
 library(pheatmap)
 source("shared/R/pub_theme.R")
 source("shared/R/tf_activity.R")
+source("shared/R/ortholog_map.R")
 
 fig_dir = "cross_dataset_metaanalysis/figures"
 dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 
 datasets = list(
-  human = list(dir = "GSE135251_human_MASLD", label = "Human MASLD (GSE135251)"),
-  ccl4  = list(dir = "GSE222576_mouse_CCl4",   label = "Mouse CCl4 (GSE222576)"),
-  taa   = list(dir = "GSE74605_mouse_TAA",     label = "Mouse TAA (GSE74605)")
+  human = list(dir = "GSE135251_human_MASLD", label = "Human MASLD (GSE135251)", organism = "human"),
+  ccl4  = list(dir = "GSE222576_mouse_CCl4",   label = "Mouse CCl4 (GSE222576)",  organism = "mouse"),
+  taa   = list(dir = "GSE74605_mouse_TAA",     label = "Mouse TAA (GSE74605)",    organism = "mouse")
 )
+
+# 마우스 심볼을 사람 ortholog 심볼로 변환 (정식 Orthology.eg.db 매칭 - toupper() 대소문자 변환이 아님).
+# 사람 데이터는 이미 HGNC 표준 심볼이라 그대로 사용. 하나의 사람 ortholog로 여러 마우스 심볼이
+# 매핑되는 모호한 경우(paralog 등)는 잘못된 병합을 막기 위해 제외.
+canonicalize_symbols = function(symbols, organism) {
+  if (organism == "human") return(symbols)
+  mapped = mouse_symbol_to_human_symbol(symbols)
+  mapped[duplicated(mapped) | duplicated(mapped, fromLast = TRUE)] = NA
+  unname(mapped)
+}
 
 # 각 데이터셋의 TF별 p-value/padj + "진행에 따른 방향"(baseline -> 가장 진행된 그룹, activity 평균 차이의 부호)
 load_dataset_tf = function(spec) {
   stats = read_csv(file.path(spec$dir, "data", "tf_stats.csv"), show_col_types = FALSE) %>%
-    transmute(TF = toupper(TF), p_value, padj)
+    mutate(TF = canonicalize_symbols(TF, spec$organism)) %>%
+    filter(!is.na(TF)) %>%
+    dplyr::select(TF, p_value, padj)
   act = readRDS(file.path(spec$dir, "data", "tf_activity.rds"))
   tf_group = act$tf_group
-  rownames(tf_group) = toupper(rownames(tf_group))
+  rownames(tf_group) = canonicalize_symbols(rownames(tf_group), spec$organism)
+  tf_group = tf_group[!is.na(rownames(tf_group)), , drop = FALSE]
   direction = sign(tf_group[, ncol(tf_group)] - tf_group[, 1])
-  stats %>% mutate(direction = direction[TF])
+  stats %>% filter(TF %in% names(direction)) %>% mutate(direction = direction[TF])
 }
 
 per_dataset = map(datasets, load_dataset_tf)
@@ -75,13 +89,13 @@ message(sprintf("세 데이터셋 모두 유의 + 방향 일치 (최종 consensu
                  sum(combined$true_consensus), nrow(combined)))
 
 top_consensus = combined %>% filter(true_consensus) %>% slice_head(n = 15) %>% pull(TF)
-print(combined %>% select(TF, all_of(padj_cols), padj_fisher, direction_concordant, true_consensus) %>% head(15))
+print(combined %>% dplyr::select(TF, all_of(padj_cols), padj_fisher, direction_concordant, true_consensus) %>% head(15))
 
 # Figure A: 상위 consensus TF들의 -log10(padj)를 데이터셋별로 비교하는 grouped bar plot
 # (2D scatter는 3개 축을 동시에 못 보여주므로, 3-way 비교에는 grouped bar가 더 명확함)
 bar_df = combined %>%
   filter(TF %in% top_consensus) %>%
-  select(TF, all_of(padj_cols)) %>%
+  dplyr::select(TF, all_of(padj_cols)) %>%
   pivot_longer(-TF, names_to = "dataset", values_to = "padj") %>%
   mutate(
     dataset = str_remove(dataset, "^padj_"),
@@ -103,8 +117,8 @@ ggsave_pub(file.path(fig_dir, "01_consensus_significance_bar.pdf"), p_bar, width
 tf_groups = map(datasets, function(spec) {
   act = readRDS(file.path(spec$dir, "data", "tf_activity.rds"))
   m = act$tf_group
-  rownames(m) = toupper(rownames(m))
-  m
+  rownames(m) = canonicalize_symbols(rownames(m), spec$organism)
+  m[!is.na(rownames(m)), , drop = FALSE]
 })
 
 zscore_rows = function(mat) {
@@ -114,14 +128,14 @@ zscore_rows = function(mat) {
   sweep(sweep(mat, 1, m, "-"), 1, s, "/")
 }
 
-avail_tf = reduce(map(tf_groups, rownames), intersect, .init = top_consensus)
+avail_tf = purrr::reduce(map(tf_groups, rownames), intersect, .init = top_consensus)
 
 z_blocks = map2(tf_groups, names(datasets), function(m, nm) {
   z = zscore_rows(m[avail_tf, , drop = FALSE])
   colnames(z) = paste0(nm, "_", colnames(m))
   z
 })
-combined_mat = reduce(z_blocks, cbind)
+combined_mat = purrr::reduce(z_blocks, cbind)
 gaps = cumsum(map_int(z_blocks, ncol))[-length(z_blocks)]
 
 pdf(file.path(fig_dir, "02_consensus_tf_heatmap.pdf"), width = 11, height = 6)
